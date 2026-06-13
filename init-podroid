@@ -2,11 +2,36 @@
 # Podroid initramfs bootstrap — mounts overlay, switch_root to /sbin/init.
 # All system bringup logic now lives in /etc/init.d/podroid-* services
 # on the Alpine squashfs.
-set -e
+#
+# NOTE: Do NOT use `set -e` before the early mounts. In a minimal busybox
+# environment the mount binary may not support all -o flags (noexec, nosuid,
+# nodev) and a failed mount combined with `set -e` causes init to exit,
+# triggering "Attempted to kill init!" kernel panic. Instead we use explicit
+# fallbacks: try with options first, fall back to a bare mount on failure.
+# `set -eu` is re-enabled after the pseudo-filesystems are confirmed up.
 
-mount -t proc    proc      /proc  -o noexec,nosuid,nodev
-mount -t sysfs   sys       /sys   -o noexec,nosuid,nodev
-mount -t devtmpfs devtmpfs /dev   -o exec,nosuid,mode=0755,size=2M
+mount_or_fallback() {
+    # Usage: mount_or_fallback <type> <source> <target> [options]
+    local fstype="$1" src="$2" tgt="$3" opts="${4:-}"
+    if [ -n "$opts" ]; then
+        mount -t "$fstype" "$src" "$tgt" -o "$opts" 2>/dev/null && return 0
+        echo "[podroid-init] WARN: mount $tgt with opts failed, retrying bare" > /dev/console
+    fi
+    mount -t "$fstype" "$src" "$tgt" 2>/dev/null && return 0
+    echo "[podroid-init] FATAL: cannot mount $tgt ($fstype)" > /dev/console
+    return 1
+}
+
+echo "[podroid-init] mounting pseudo-filesystems..." > /dev/console
+mount_or_fallback proc    proc      /proc "noexec,nosuid,nodev"
+echo "[podroid-init] /proc ok" > /dev/console
+mount_or_fallback sysfs   sys       /sys  "noexec,nosuid,nodev"
+echo "[podroid-init] /sys ok" > /dev/console
+mount_or_fallback devtmpfs devtmpfs /dev  "exec,nosuid,mode=0755,size=2M"
+echo "[podroid-init] /dev ok" > /dev/console
+
+# From here on, failures are fatal and we want to catch unbound variables.
+set -eu
 
 echo "Mounting storage..." > /dev/console
 
@@ -90,4 +115,5 @@ mount --move /sys  /mnt/overlay/sys \
 mount --move /dev  /mnt/overlay/dev \
     || { echo "FATAL: mount --move /dev failed" > /dev/console; exec sh; }
 
+echo "[podroid-init] switch_root -> /sbin/init" > /dev/console
 exec /sbin/switch_root /mnt/overlay /sbin/init
